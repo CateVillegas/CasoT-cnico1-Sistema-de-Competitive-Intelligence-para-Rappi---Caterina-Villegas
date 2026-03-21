@@ -142,6 +142,10 @@ Se ejecutó el análisis de tipo "{analysis_type}" y estos son los resultados:
 Genera una respuesta ejecutiva clara para el equipo de SP&A y Operations de Rappi. 
 Incluye una tabla formateada con los datos si hay múltiples zonas/países.
 Termina con la sección de sugerencia de siguiente análisis."""
+    # Important: request the model NOT to dump raw data tables or CSV output.
+    # We provide the data via the UI Export CSV button; the assistant should only
+    # include concise summaries, highlights, and at most a 3-row example table.
+    prompt += "\n\nINSTRUCCIÓN IMPORTANTE: No incluyas ni pegues las filas de datos completas ni formatos CSV en la respuesta. Resume hallazgos, destaca anomalías y, si acaso, muestra como máximo 3 filas de ejemplo en una tabla resumida. Para obtener los datos completos, usa la opción 'Exportar CSV'."
 
     messages = [{"role": "user", "parts": [{"text": prompt}]}]
     
@@ -241,6 +245,22 @@ def generate_chart_data(analysis_result: dict, analysis_type: str) -> dict | Non
             'value_labels': value_labels,
             'title': f"Comparación: {metric}",
             'ylabel': '%' if any(is_percentage_metric(metric, comp_data[k]['mean']) for k in labels) else 'Valor',
+            'color': '#FF441F',
+        }
+
+    elif analysis_type == 'multivariable':
+        data = analysis_result.get('data', [])
+        if not data:
+            return None
+        metric_high = analysis_result.get('metric_high', '')
+        metric_low = analysis_result.get('metric_low', '')
+        return {
+            'type': 'bar',
+            'labels': [f"{d['zone'][:25]}\n({d['country']})" for d in data],
+            'values': [_chart_val(d.get('val_high'), metric_high) for d in data],
+            'value_labels': [f"{d.get('val_high_fmt','') } / {d.get('val_low_fmt','')}" for d in data],
+            'title': f"Zonas: {metric_high} vs {metric_low}",
+            'ylabel': '%' if any(is_percentage_metric(metric_high, d.get('val_high')) for d in data) else 'Valor',
             'color': '#FF441F',
         }
     

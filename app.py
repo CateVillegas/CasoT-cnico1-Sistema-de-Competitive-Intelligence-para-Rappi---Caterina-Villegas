@@ -182,6 +182,68 @@ def chat():
     
     # Step 4: Generate natural language response
     response_text = generate_response(user_message, result, query_type, history)
+
+    # Sanitize: if the assistant accidentally included a raw CSV/data dump
+    # detect blocks that look like CSV (multiple lines with commas) and remove them.
+    try:
+        parts = response_text.split('\n\n')
+        filtered_parts = []
+        for p in parts:
+            lines = [l for l in p.strip().splitlines() if l.strip()]
+            if len(lines) >= 2:
+                comma_lines = sum(1 for l in lines if ',' in l)
+                # If most lines contain commas, treat as CSV-like and skip it
+                if comma_lines / len(lines) > 0.6:
+                    continue
+            filtered_parts.append(p)
+        response_text = '\n\n'.join(filtered_parts).strip()
+    except Exception:
+        pass
+
+    # For top_zones responses, return a concise markdown table (title + table)
+    # and omit the verbose AI analysis to avoid duplication.
+    try:
+        if query_type == 'top_zones' and result and isinstance(result.get('data'), list):
+            rows = result['data']
+            if rows:
+                metric = result.get('metric', '')
+                n = result.get('n', len(rows))
+                header = f"**Top {n} Zonas — {metric} (Semana Actual)**"
+                table_lines = ["Zona | Ciudad | País | Valor", "|---|---|---:|---:|"]
+                for r in rows:
+                    zone = r.get('zone', '')
+                    city = r.get('city', '')
+                    country = r.get('country', '')
+                    val = r.get('value_fmt', str(r.get('value', '')))
+                    table_lines.append(f"{zone} | {city} | {country} | {val}")
+
+                table_md = header + "\n\n" + "\n".join(table_lines) + "\n"
+                response_text = table_md
+    except Exception:
+        pass
+
+    # For multivariable, show a concise table with both metrics and omit verbose AI text
+    try:
+        if query_type == 'multivariable' and result and isinstance(result.get('data'), list):
+            rows = result['data']
+            if rows:
+                mh = result.get('metric_high', 'Metric A')
+                ml = result.get('metric_low', 'Metric B')
+                header = f"**Zonas con alto {mh} pero bajo {ml}**"
+                table_lines = [f"Zona | Ciudad | País | Tipo de Zona | {mh} | {ml}", "|---|---|---:|---|---:|---:|"]
+                for r in rows:
+                    zone = r.get('zone', '')
+                    city = r.get('city', '')
+                    country = r.get('country', '')
+                    zt = r.get('zone_type', '')
+                    vh = r.get('val_high_fmt', str(r.get('val_high', '')))
+                    vl = r.get('val_low_fmt', str(r.get('val_low', '')))
+                    table_lines.append(f"{zone} | {city} | {country} | {zt} | {vh} | {vl}")
+
+                table_md = header + "\n\n" + "\n".join(table_lines) + "\n"
+                response_text = table_md
+    except Exception:
+        pass
     
     # Step 5: Prepare CSV export data
     csv_data = None
