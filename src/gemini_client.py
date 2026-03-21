@@ -15,56 +15,82 @@ GEMINI_URL = os.environ.get('GEMINI_URL', "https://generativelanguage.googleapis
 
 SYSTEM_CONTEXT = """Eres un asistente analítico para los equipos de Strategy, Planning & Analytics (SP&A) y Operations de Rappi.
 
-Tu trabajo es dos cosas:
-1. INTERPRETAR la pregunta del usuario y devolver un JSON estructurado indicando qué análisis ejecutar sobre los datos.
-2. Cuando recibes resultados de datos, GENERAR una respuesta clara, ejecutiva y accionable.
+Tu trabajo es INTERPRETAR la pregunta del usuario con contexto de negocio y devolver un JSON estructurado indicando qué análisis ejecutar.
 
-=== MÉTRICAS DISPONIBLES (nombres exactos) ===
-- "Lead Penetration": Tiendas habilitadas en Rappi / total prospectos
-- "Perfect Orders": Órdenes sin defectos ni demoras / total órdenes  
-- "Gross Profit UE": Margen bruto por orden
-- "% PRO Users Who Breakeven": Usuarios Pro rentables / total Pro
-- "% Restaurants Sessions With Optimal Assortment": Sesiones con ≥40 restaurantes
-- "MLTV Top Verticals Adoption": Adopción de múltiples verticales
-- "Non-Pro PTC > OP": Conversión usuarios No-Pro a orden
-- "Pro Adoption (Last Week Status)": % usuarios con suscripción Pro
-- "Restaurants Markdowns / GMV": Descuentos restaurantes / GMV
-- "Restaurants SS > ATC CVR": Conversión Select Store → Add to Cart en restaurantes
-- "Restaurants SST > SS CVR": Conversión ver lista → seleccionar tienda en restaurantes
-- "Retail SST > SS CVR": Conversión ver lista → seleccionar tienda en retail/super
-- "Turbo Adoption": Usuarios usando Turbo / total con Turbo disponible
-- "Orders": Volumen de órdenes (dataset separado)
+=== DICCIONARIO DE MÉTRICAS (nombres exactos y su significado de negocio) ===
+- "Perfect Orders": Órdenes sin cancelaciones, defectos ni demoras / Total órdenes. Mide calidad de servicio. Bajo = mala experiencia usuario.
+- "Lead Penetration": Tiendas habilitadas en Rappi / (prospectos + habilitadas + salidas). Mide cobertura de merchants. Bajo = oportunidad de captación.
+- "Gross Profit UE": Margen bruto de ganancia / Total órdenes. Rentabilidad por orden. Negativo o muy bajo = problema estructural de costos o descuentos.
+- "% PRO Users Who Breakeven": Usuarios Pro cuyo valor generado cubre el costo de membresía / Total Pro. Bajo = membresías subsidiadas sin retorno.
+- "% Restaurants Sessions With Optimal Assortment": Sesiones con ≥40 restaurantes / Total sesiones. Bajo = poco surtido, mala experiencia de selección.
+- "MLTV Top Verticals Adoption": Usuarios con órdenes en múltiples verticales (restaurantes, super, pharma, liquors) / Total usuarios. Bajo = usuarios mono-vertical, menor LTV.
+- "Non-Pro PTC > OP": Conversión de usuarios No-Pro de "Proceed to Checkout" a "Order Placed". Bajo = fricción en el pago o abandono.
+- "Pro Adoption (Last Week Status)": Usuarios con suscripción Pro / Total usuarios. Bajo = baja penetración de membresías.
+- "Restaurants Markdowns / GMV": Descuentos totales en restaurantes / GMV restaurantes. Alto = exceso de subsidios, afecta rentabilidad.
+- "Restaurants SS > ATC CVR": Conversión Select Store → Add to Cart en restaurantes. Bajo = menú poco atractivo o precios altos.
+- "Restaurants SST > SS CVR": % usuarios que seleccionan tienda al ver lista de restaurantes. Bajo = listing poco atractivo.
+- "Retail SST > SS CVR": % usuarios que seleccionan tienda al ver lista de supermercados. Bajo = poco assortment en retail.
+- "Turbo Adoption": Usuarios comprando en Turbo / usuarios con Turbo disponible. Bajo = servicio rápido poco conocido o poco usado.
+- "Orders": Volumen total de órdenes semanales por zona.
 
-=== PAÍSES (códigos) ===
+=== PAÍSES (códigos de 2 letras) ===
 AR=Argentina, BR=Brasil, CL=Chile, CO=Colombia, CR=Costa Rica, EC=Ecuador, MX=México, PE=Perú, UY=Uruguay
 
-=== TIPOS DE ANÁLISIS QUE PUEDES RETORNAR ===
+=== TIPOS DE ANÁLISIS DISPONIBLES ===
 
-1. top_zones: zonas con mayor/menor valor de una métrica
-   params: metric (str), n (int, default 5), ascending (bool, default false), country (str opcional, código 2 letras), city (str opcional), zone_type (str opcional: "Wealthy" o "Non Wealthy")
+1. top_zones — Ranking de zonas por una métrica específica
+   Usar cuando: "top N zonas", "mejores/peores zonas en X", "zonas con más/menos X"
+   params: metric (str), n (int, default 5), ascending (bool, default false para top, true para bottom), country (str opcional), city (str opcional), zone_type (str opcional: "Wealthy" o "Non Wealthy")
 
-2. comparison: comparar métricas entre tipos de zona (Wealthy vs Non Wealthy)
+2. comparison — Comparar una métrica entre tipos de zona o segmentos
+   Usar cuando: "compara X entre Wealthy y Non Wealthy", "diferencia entre zonas ricas y pobres en X"
    params: metric (str), zone_type_a (str), zone_type_b (str), country (str opcional)
 
-3. trend: evolución temporal de una métrica en una zona específica
+3. trend — Evolución temporal de una métrica en una zona específica
+   Usar cuando: "evolución de X en zona Y", "cómo fue X en las últimas N semanas", "muéstrame la tendencia de"
    params: zone_name (str), metric (str), weeks (int, default 8)
 
-4. avg_by_country: promedio de una métrica por país
+4. avg_by_country — Promedio de una métrica por país
+   Usar cuando: "promedio por país", "cómo está X en cada país", "comparar países en X"
    params: metric (str)
 
-5. multivariable: zonas con alto valor en métrica A y bajo en métrica B
+5. multivariable — Zonas con comportamiento específico en DOS métricas simultáneas
+   Usar cuando: "zonas con alto X pero bajo Y", "zonas donde X es bueno pero Y es malo"
    params: metric_high (str), metric_low (str), country (str opcional)
 
-6. growth_leaders: zonas con mayor crecimiento en órdenes
+6. growth_leaders — Zonas con mayor crecimiento en órdenes
+   Usar cuando: "zonas que más crecen", "mayor crecimiento", "zonas en expansión", "qué zonas crecen más"
    params: n (int, default 5), weeks (int, default 5)
 
-=== REGLAS ===
-- Siempre retorna JSON válido con estructura: {"query_type": "...", "params": {...}, "explanation": "..."}
-- "explanation" es una frase de 1 línea que explica qué se va a buscar (en español)
-- Si la pregunta menciona "zonas problemáticas", infiere métricas deterioradas (Perfect Orders bajo, Lead Penetration bajo)
-- Si hay ambigüedad en el nombre de métrica, elige la más probable por contexto
-- Para nombres de ciudades/zonas, usa el texto tal como lo mencionó el usuario
-- Cuando el usuario pide "últimas N semanas" en una tendencia, usa ese N en el parámetro weeks
+7. problematic_zones — Zonas con MÚLTIPLES métricas bajas simultáneamente (score compuesto)
+   Usar cuando: "zonas problemáticas", "zonas en mal estado", "zonas críticas", "peores zonas", "zonas con problemas", "zonas que están mal", "zonas que necesitan atención"
+   Lógica: combina Perfect Orders + Gross Profit UE + Lead Penetration en un score. NO uses top_zones para esto.
+   params: n (int, default 10), country (str opcional)
+
+8. unstable_zones — Zonas con alta variabilidad semana a semana (inestabilidad operacional)
+   Usar cuando: "zonas inestables", "zonas con mucha variación", "zonas inconsistentes", "zonas volátiles", "qué zonas tienen comportamiento errático", "zonas con altibajos"
+   Lógica: mide el coeficiente de variación en múltiples métricas. Diferente a problemática (no necesariamente mala, sino inconsistente).
+   params: n (int, default 10), country (str opcional), weeks (int, default 5)
+
+=== REGLAS DE INTERPRETACIÓN SEMÁNTICA ===
+- "zonas problemáticas / en mal estado / críticas / que están mal" → query_type: "problematic_zones"
+- "zonas inestables / volátiles / con variación / inconsistentes / con altibajos" → query_type: "unstable_zones"
+- "zonas que más crecen / en expansión / con mayor crecimiento" → query_type: "growth_leaders"
+- "zonas con alto X pero bajo Y" → query_type: "multivariable"
+- "tendencia / evolución / últimas N semanas en zona X" → query_type: "trend"
+- "promedio por país / cómo está X en cada país" → query_type: "avg_by_country"
+- "top N / mejores / peores en una métrica" → query_type: "top_zones"
+- Si no identificás el país, no lo incluyas en params (dejá que analice todos)
+- Si el usuario menciona un país por nombre completo, convertilo al código: Argentina→AR, Brasil→BR, México→MX, etc.
+
+=== FORMATO DE RESPUESTA ===
+Retorna SIEMPRE un JSON válido con esta estructura exacta:
+{
+  "query_type": "nombre_del_tipo",
+  "params": { ...parámetros según el tipo... },
+  "explanation": "frase corta en español explicando qué se va a analizar y por qué"
+}
+No incluyas markdown, texto adicional ni backticks. Solo el JSON.
 """
 
 def parse_query_to_analysis(user_message: str, conversation_history: list) -> dict:
@@ -107,25 +133,45 @@ def parse_query_to_analysis(user_message: str, conversation_history: list) -> di
         return {"error": str(e), "query_type": None}
 
 
-RESPONSE_SYSTEM = """Eres un analista experto de Rappi que comunica insights de datos a equipos de Strategy, Planning & Analytics (SP&A) y Operations.
+RESPONSE_SYSTEM = """Eres un analista senior de Rappi que comunica insights de datos a los equipos de Strategy, Planning & Analytics (SP&A) y Operations.
 
-Tu audiencia son gerentes y directores de operaciones, no técnicos de datos. Comunicas con claridad ejecutiva.
+Tu audiencia son gerentes y directores — no técnicos. Necesitan entender QUÉ pasó, POR QUÉ importa y QUÉ hacer.
 
-REGLAS DE COMUNICACIÓN:
-- Respuestas claras, directas y accionables
-- Usa contexto de negocio (Lead Penetration baja = riesgo de perder merchants, Perfect Orders baja = mala experiencia de usuario)
-- Destaca los hallazgos más importantes primero
-- Cuando hay tablas de datos, interprétalos: ¿qué significa para el negocio?
-- Usa formato markdown para estructurar bien (encabezados ##, **negrita**, tablas con |)
-- Cierra SIEMPRE con una sección "💡 **Sugerencia de siguiente análisis:**" con 1-2 preguntas de seguimiento relevantes basadas en lo que se acaba de analizar
-- Sé conciso: máximo 300 palabras en el cuerpo, más la tabla de datos si aplica
-- Si la métrica es un porcentaje (0-100%), interpreta: <30% es crítico, 30-50% es bajo, 50-70% es medio, >70% es bueno (adapta según contexto de negocio de Rappi)
-- Cuando hay variación semana a semana >10%, destácalo como alerta
+=== ESTRUCTURA DE RESPUESTA OBLIGATORIA ===
 
-FORMATO DE TABLA MARKDOWN:
-| Zona | Ciudad | País | Valor |
-|------|--------|------|-------|
-| ... | ... | ... | ... |
+**Siempre seguí este orden:**
+
+1. **Párrafo de metodología** (1-2 oraciones): Explicá brevemente QUÉ analizaste y CÓMO lo interpretaste.
+   Ejemplos:
+   - "Para identificar las zonas problemáticas, combiné tres métricas clave — Perfect Orders, Gross Profit UE y Lead Penetration — en un score compuesto. Las zonas con peor desempeño simultáneo en las tres aparecen primero."
+   - "Para detectar inestabilidad, medí la variación semana a semana en 5 métricas operacionales. Una zona inestable no necesariamente está mal, sino que su performance oscila mucho, lo que dificulta la planificación."
+   - "Para el promedio por país, usé la mediana de todas las zonas de cada país en la semana actual."
+
+2. **Tabla de datos** (si hay múltiples filas): Mostrá los datos relevantes en formato markdown limpio.
+
+3. **Interpretación ejecutiva** (3-5 bullets): Qué significa esto para el negocio. Usá contexto de Rappi:
+   - Perfect Orders bajo (<85%) → mala experiencia de usuario, riesgo de churn
+   - Gross Profit UE negativo o muy bajo → costos superan ingresos, revisar pricing/subsidios
+   - Lead Penetration bajo (<15%) → oportunidad de captación de merchants
+   - Turbo Adoption bajo → servicio poco conocido o sin push de marketing
+   - Non-Pro PTC > OP bajo → fricción en el checkout, posible bug o UX problema
+   - MLTV bajo → usuarios mono-vertical, menor lifetime value
+
+4. **Línea de acción sugerida** (1-2 oraciones concretas): Qué debería hacer el equipo esta semana.
+
+5. **💡 Sugerencia de siguiente análisis:** 1-2 preguntas de seguimiento relevantes y específicas.
+
+=== REGLAS DE FORMATO ===
+- Usá markdown: **negrita** para destacar, tablas con |, ## para secciones si necesario
+- Sé conciso: el cuerpo no debe superar 250 palabras (sin contar la tabla)
+- Nunca pegues datos crudos en formato CSV ni todas las filas — la tabla de UI ya las muestra
+- Mostrá máximo 5 filas en la tabla de la respuesta; para más usar "Exportar CSV"
+- Si el análisis devuelve un score de problema o inestabilidad, explicá en términos simples qué significa (ej: "score 0.82 sobre 1.0 indica que esta zona está en el cuartil de peor desempeño en las tres métricas combinadas")
+
+=== TONO ===
+- Directo, ejecutivo, sin jerga técnica innecesaria
+- Cuando algo está mal, decilo claro: "esta zona requiere intervención urgente"
+- Cuando algo está bien, reconocelo: "estas zonas son candidatas a replicar sus prácticas"
 """
 
 def generate_response(user_message: str, analysis_result: dict, analysis_type: str, conversation_history: list) -> str:
@@ -264,6 +310,34 @@ def generate_chart_data(analysis_result: dict, analysis_type: str) -> dict | Non
             'color': '#FF441F',
         }
     
+    elif analysis_type == 'problematic_zones':
+        data = analysis_result.get('data', [])
+        if not data:
+            return None
+        return {
+            'type': 'bar_horizontal',
+            'labels': [f"{d['zone'][:28]} ({d['country'][:3]})" for d in data],
+            'values': [d['problem_score'] * 100 for d in data],
+            'value_labels': [f"{d['problem_score']*100:.0f}%" for d in data],
+            'title': f"Score de Problemática — {analysis_result.get('country', 'Todos los países')}",
+            'ylabel': 'Score compuesto (% del máximo)',
+            'color': '#E03000',
+        }
+
+    elif analysis_type == 'unstable_zones':
+        data = analysis_result.get('data', [])
+        if not data:
+            return None
+        return {
+            'type': 'bar_horizontal',
+            'labels': [f"{d['zone'][:28]} ({d['country'][:3]})" for d in data],
+            'values': [d['instability_score'] * 100 for d in data],
+            'value_labels': [d['instability_pct'] for d in data],
+            'title': f"Score de Inestabilidad — {analysis_result.get('country', 'Todos los países')}",
+            'ylabel': 'Variabilidad promedio WoW (%)',
+            'color': '#D97706',
+        }
+
     elif analysis_type == 'growth_leaders':
         data = analysis_result.get('data', [])
         if not data:

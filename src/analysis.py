@@ -247,6 +247,133 @@ def growth_leaders(n=5, weeks=5):
     return meta, None
 
 
+def problematic_zones(n=10, country=None):
+    """Zonas con múltiples métricas simultáneamente por debajo del benchmark.
+    Combina Perfect Orders, Gross Profit UE y Lead Penetration en un score compuesto.
+    """
+    metrics_df, _, _ = load_data()
+    key_metrics = ['Perfect Orders', 'Gross Profit UE', 'Lead Penetration']
+
+    dfs = []
+    for metric in key_metrics:
+        sub = _filter_df(metrics_df, country=country, metric=metric)
+        sub = sub[['COUNTRY', 'CITY', 'ZONE', 'ZONE_TYPE', 'L0W_ROLL']].copy()
+        sub = sub.drop_duplicates(subset=['COUNTRY', 'CITY', 'ZONE'])
+        sub = sub.rename(columns={'L0W_ROLL': metric})
+        dfs.append(sub)
+
+    merged = dfs[0]
+    for df in dfs[1:]:
+        merged = merged.merge(df, on=['COUNTRY', 'CITY', 'ZONE', 'ZONE_TYPE'], how='inner')
+    merged = merged.dropna()
+
+    if merged.empty:
+        return None, "No hay datos suficientes para cruzar las métricas en las zonas seleccionadas."
+
+    # Normalize 0-1 per metric: score_problema = 1 means worst
+    for metric in key_metrics:
+        col_min = merged[metric].min()
+        col_max = merged[metric].max()
+        rng = col_max - col_min if col_max != col_min else 1
+        merged[f'_score_{metric}'] = 1 - (merged[metric] - col_min) / rng
+
+    score_cols = [f'_score_{m}' for m in key_metrics]
+    merged['problem_score'] = merged[score_cols].mean(axis=1)
+    merged = merged.sort_values('problem_score', ascending=False).head(n)
+
+    results = []
+    for _, row in merged.iterrows():
+        results.append({
+            'zone': row['ZONE'],
+            'city': row['CITY'],
+            'country': COUNTRY_NAMES.get(row['COUNTRY'], row['COUNTRY']),
+            'zone_type': row['ZONE_TYPE'],
+            'problem_score': round(row['problem_score'], 3),
+            'Perfect Orders': row['Perfect Orders'],
+            'perfect_orders_fmt': format_metric_value('Perfect Orders', row['Perfect Orders']),
+            'Gross Profit UE': row['Gross Profit UE'],
+            'gross_profit_fmt': format_metric_value('Gross Profit UE', row['Gross Profit UE']),
+            'Lead Penetration': row['Lead Penetration'],
+            'lead_penetration_fmt': format_metric_value('Lead Penetration', row['Lead Penetration']),
+        })
+
+    meta = {
+        'type': 'problematic_zones',
+        'country': COUNTRY_NAMES.get(country, country) if country else 'Todos los países',
+        'n': n,
+        'metrics_used': key_metrics,
+        'data': results,
+    }
+    return meta, None
+
+
+def unstable_zones(n=10, country=None, weeks=5):
+    """Zonas con alta variabilidad WoW en múltiples métricas — 'inestabilidad operacional'.
+    Una zona inestable es la que tiene altos saltos entre semanas, aunque no necesariamente
+    tendencia clara hacia abajo. Se mide con el coeficiente de variación (CV) promedio
+    sobre las métricas clave de las últimas N semanas.
+    """
+    metrics_df, _, _ = load_data()
+    key_metrics = ['Perfect Orders', 'Gross Profit UE', 'Lead Penetration',
+                   'Non-Pro PTC > OP', 'Turbo Adoption']
+
+    week_cols = WEEK_COLS_METRICS[-weeks:]
+
+    records = {}  # zone_key -> {zone, city, country, zone_type, cv_list}
+    for metric in key_metrics:
+        sub = _filter_df(metrics_df, country=country, metric=metric)
+        sub = sub.drop_duplicates(subset=['COUNTRY', 'CITY', 'ZONE'])
+        for _, row in sub.iterrows():
+            vals = [row[c] for c in week_cols if not pd.isna(row[c])]
+            if len(vals) < 3:
+                continue
+            mean_val = np.mean(vals)
+            std_val = np.std(vals)
+            cv = std_val / abs(mean_val) if abs(mean_val) > 0.001 else 0
+            key = (row['COUNTRY'], row['CITY'], row['ZONE'])
+            if key not in records:
+                records[key] = {
+                    'zone': row['ZONE'], 'city': row['CITY'],
+                    'country': COUNTRY_NAMES.get(row['COUNTRY'], row['COUNTRY']),
+                    'zone_type': row.get('ZONE_TYPE', ''),
+                    'cv_list': [], 'metric_cvs': {}
+                }
+            records[key]['cv_list'].append(cv)
+            records[key]['metric_cvs'][metric] = round(cv, 4)
+
+    if not records:
+        return None, "No hay datos suficientes para calcular inestabilidad."
+
+    for key in records:
+        cvs = records[key]['cv_list']
+        records[key]['instability_score'] = round(np.mean(cvs), 4) if cvs else 0
+
+    sorted_zones = sorted(records.values(), key=lambda x: x['instability_score'], reverse=True)
+    top = sorted_zones[:n]
+
+    results = []
+    for z in top:
+        results.append({
+            'zone': z['zone'],
+            'city': z['city'],
+            'country': z['country'],
+            'zone_type': z['zone_type'],
+            'instability_score': z['instability_score'],
+            'instability_pct': f"{z['instability_score']*100:.1f}%",
+            'metric_cvs': z['metric_cvs'],
+            'most_unstable_metric': max(z['metric_cvs'], key=z['metric_cvs'].get) if z['metric_cvs'] else '—',
+        })
+
+    meta = {
+        'type': 'unstable_zones',
+        'country': COUNTRY_NAMES.get(country, country) if country else 'Todos los países',
+        'n': n,
+        'weeks': weeks,
+        'data': results,
+    }
+    return meta, None
+
+
 def run_analysis_query(query_type, params):
     """Dispatch analysis based on query type."""
     if query_type == 'top_zones':
@@ -261,5 +388,9 @@ def run_analysis_query(query_type, params):
         return multivariable_analysis(**params)
     elif query_type == 'growth_leaders':
         return growth_leaders(**params)
+    elif query_type == 'problematic_zones':
+        return problematic_zones(**params)
+    elif query_type == 'unstable_zones':
+        return unstable_zones(**params)
     else:
         return None, "Tipo de análisis no reconocido."
