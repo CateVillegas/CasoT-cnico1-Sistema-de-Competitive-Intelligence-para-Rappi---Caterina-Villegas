@@ -17,7 +17,7 @@ try:
 except Exception:
     pass
 
-from src.data_loader import load_data, get_context_summary, WEEK_LABELS
+from src.data_loader import load_data, get_context_summary, WEEK_LABELS, is_percentage_metric
 from src.analysis import run_analysis_query
 from src.gemini_client import parse_query_to_analysis, generate_response, generate_chart_data
 from src.insights_engine import compile_raw_insights, generate_report_with_gemini, generate_pdf_report
@@ -242,6 +242,88 @@ def chat():
 
                 table_md = header + "\n\n" + "\n".join(table_lines) + "\n"
                 response_text = table_md
+    except Exception:
+        pass
+
+    # For comparison queries, produce a short, clear textual summary (plus chart)
+    try:
+        if query_type == 'comparison' and result and isinstance(result.get('data'), dict):
+            comp = result['data']
+            metric = result.get('metric', '')
+            labels = list(comp.keys())
+            if len(labels) >= 2:
+                a, b = labels[0], labels[1]
+                ma = comp[a].get('mean')
+                mb = comp[b].get('mean')
+                ma_fmt = comp[a].get('mean_fmt', str(ma))
+                mb_fmt = comp[b].get('mean_fmt', str(mb))
+                count_a = comp[a].get('count', 0)
+                count_b = comp[b].get('count', 0)
+
+                # format difference
+                diff = None
+                diff_display = ''
+                try:
+                    if ma is not None and mb is not None:
+                        diff = ma - mb
+                        if is_percentage_metric(metric, ma) or is_percentage_metric(metric, mb):
+                            diff_display = f"{diff * 100:+.1f} p.p."
+                            threshold = 0.02
+                        else:
+                            diff_display = f"{diff:+.2f}"
+                            threshold = 0.10
+                except Exception:
+                    diff_display = ''
+                    threshold = 0.10
+
+                country_txt = f" en {result.get('country')}" if result.get('country') else ''
+                summary_lines = []
+                summary_lines.append(f"**Comparación: {metric}**")
+                summary_lines.append("")
+                summary_lines.append(f"En{country_txt}, `{a}` tiene {ma_fmt} ({count_a} zonas) y `{b}` tiene {mb_fmt} ({count_b} zonas).")
+                if diff_display:
+                    summary_lines[-1] += f" Diferencia: {diff_display}."
+
+                # interpretation: give concise, actionable explanation + next steps
+                if diff is not None:
+                    # direction and magnitude
+                    if diff > 0:
+                        direction = f"`{a}` muestra {diff_display} más que `{b}`"
+                    elif diff < 0:
+                        direction = f"`{b}` muestra {diff_display} más que `{a}`"
+                    else:
+                        direction = "No hay diferencia entre los grupos."
+
+                    # practical impact (qualitative)
+                    if abs(diff) >= threshold:
+                        impact = "Impacto: diferencial operativo potencial — conviene investigar causas y oportunidades de mejora."
+                    else:
+                        impact = "Impacto: diferencia pequeña, probablemente no requiera acción inmediata salvo monitoreo."
+
+                    # suggested next steps
+                    steps = (
+                        "Sugerencias: 1) Revisar las métricas de cumplimiento y tiempos de entrega en las zonas con peor Perfect Orders; "
+                        "2) Inspeccionar mix y calidad de merchants en esos grupos; 3) Revisar promociones/operaciones locales que afecten cancelaciones."
+                    )
+
+                    summary_lines.append(direction + ".")
+                    summary_lines.append(impact)
+                    summary_lines.append(steps)
+
+                # examples (top zones) if available
+                try:
+                    a_examples = comp[a].get('zones_sample', [])[:3]
+                    b_examples = comp[b].get('zones_sample', [])[:3]
+                    if a_examples:
+                        names = ', '.join([z.get('ZONE') or z.get('zone') or str(z) for z in a_examples])
+                        summary_lines.append(f"Ejemplos {a}: {names}.")
+                    if b_examples:
+                        names = ', '.join([z.get('ZONE') or z.get('zone') or str(z) for z in b_examples])
+                        summary_lines.append(f"Ejemplos {b}: {names}.")
+                except Exception:
+                    pass
+
+                response_text = '\n'.join(summary_lines)
     except Exception:
         pass
     
