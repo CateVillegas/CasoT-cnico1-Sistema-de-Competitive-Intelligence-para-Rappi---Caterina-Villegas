@@ -200,15 +200,14 @@ Termina con la sección de sugerencia de siguiente análisis."""
         "contents": messages,
         "generationConfig": {
             "temperature": 0.7,
-            "maxOutputTokens": 1024,
+            "maxOutputTokens": 2048,
         }
     }
-    
     try:
         resp = requests.post(
             f"{GEMINI_URL}?key={GEMINI_API_KEY}",
             json=payload,
-            timeout=30
+            timeout=60
         )
         resp.raise_for_status()
         data = resp.json()

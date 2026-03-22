@@ -200,8 +200,11 @@ def chat():
             lines = [l for l in p.strip().splitlines() if l.strip()]
             if len(lines) >= 2:
                 comma_lines = sum(1 for l in lines if ',' in l)
-                # If most lines contain commas, treat as CSV-like and skip it
-                if comma_lines / len(lines) > 0.6:
+                pipe_lines = sum(1 for l in lines if '|' in l)
+                # If most lines contain commas and the block is NOT a markdown
+                # table (pipes), treat as CSV-like and skip it. This preserves
+                # markdown tables which use '|' characters.
+                if pipe_lines / len(lines) < 0.5 and (comma_lines / len(lines) > 0.6):
                     continue
             filtered_parts.append(p)
         response_text = '\n\n'.join(filtered_parts).strip()
@@ -314,6 +317,43 @@ def chat():
 
                 table_md = header + "\n\n" + "\n".join(table_lines) + "\n"
                 response_text = table_md
+    except Exception:
+        pass
+
+    # For growth_leaders, produce a clear table + methodology + interpretation
+    try:
+        if query_type == 'growth_leaders' and result and isinstance(result.get('data'), list):
+            rows = result['data']
+            if rows:
+                header = f"**Zonas con mayor crecimiento en órdenes — Últimas {result.get('labels') and len(result.get('labels')) or ''} semanas**"
+                table_lines = ["| Zona | Ciudad | País | Crecimiento % | Órdenes (Inicio) | Órdenes (Actual) |", "| --- | --- | ---: | ---: | ---: | ---: |"]
+                for r in rows:
+                    zone = r.get('zone', '')
+                    city = r.get('city', '')
+                    country = r.get('country', '')
+                    growth = r.get('growth_pct_fmt', f"{r.get('growth_pct',0)*100:.1f}%")
+                    start = r.get('start_orders', r.get('weekly',[None])[0])
+                    end = r.get('end_orders', '')
+                    table_lines.append(f"| {zone} | {city} | {country} | {growth} | {start} | {end} |")
+
+                table_md = header + "\n\n" + "\n".join(table_lines) + "\n"
+
+                methodology = (
+                    "Para identificar estas zonas calculamos el porcentaje de incremento entre las órdenes de la semana actual "
+                    "y las órdenes de hace N semanas para cada zona. Se priorizan zonas con mayor crecimiento relativo y volumen suficiente."
+                )
+
+                causes = [
+                    "Efecto base pequeño (pocas órdenes iniciales): el % puede aumentar mucho con pocos pedidos extra.",
+                    "Campañas locales o promociones que aumentaron el tráfico temporalmente.",
+                    "Mejoras operativas o disponibilidad de más restaurantes/horarios.",
+                    "Eventos locales o estacionales (festivos, aperturas).",
+                ]
+
+                interpretation = "\n".join(f"- {c}" for c in causes)
+                action = "Acción: validar las top zonas (verificar campaña, disponibilidad, anomalías de datos) y monitorear 2–3 semanas para confirmar sostenibilidad."
+
+                response_text = table_md + "\n**Metodología**\n\n" + methodology + "\n\n**Posibles causas del crecimiento**\n\n" + interpretation + "\n\n**Línea de acción sugerida**\n\n" + action
     except Exception:
         pass
 
