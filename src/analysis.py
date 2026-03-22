@@ -147,14 +147,16 @@ def avg_by_country(metric):
     for country, grp in df.groupby('COUNTRY'):
         vals = grp['L0W_ROLL'].dropna()
         if len(vals) > 0:
+            mean_val = vals.mean()
+            median_val = vals.median()
             results.append({
                 'country_code': country,
                 'country': COUNTRY_NAMES.get(country, country),
-                'avg': vals.mean(),
-                'avg_fmt': format_metric_value(metric, vals.mean()),
+                'avg': mean_val,
+                'avg_fmt': format_metric_value(metric, mean_val, is_aggregate=True),
                 'zones_count': len(vals),
-                'median': vals.median(),
-                'median_fmt': format_metric_value(metric, vals.median()),
+                'median': median_val,
+                'median_fmt': format_metric_value(metric, median_val, is_aggregate=True),
             })
     results.sort(key=lambda x: x['avg'], reverse=True)
     

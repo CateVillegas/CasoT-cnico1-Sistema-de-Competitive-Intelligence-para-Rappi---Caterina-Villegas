@@ -42,15 +42,23 @@ RATIO_METRICS = {
 NUMERIC_METRICS = {'Gross Profit UE', 'Orders'}
 
 
-def format_metric_value(metric: str, value) -> str:
-    """Format a metric value appropriately based on its type."""
+def format_metric_value(metric: str, value, is_aggregate: bool = False) -> str:
+    """Format a metric value appropriately based on its type.
+    
+    is_aggregate=True: for averages/medians where outlier zones may push the value
+    above the normal 0-1 range for ratio metrics — still display with context.
+    """
     import math
     if value is None or (isinstance(value, float) and math.isnan(value)):
         return "N/A"
     if metric in RATIO_METRICS:
-        if abs(value) <= 1.5:  # treat as 0-1 ratio → show as %
+        if abs(value) <= 1.5:
             return f"{value * 100:.1f}%"
-        else:  # outlier: show raw value
+        elif is_aggregate:
+            # Aggregate was skewed by outlier zones — show as % with a note
+            return f"{value * 100:.1f}% *"
+        else:
+            # Individual outlier zone (data anomaly) — show raw
             return f"{value:,.1f}"
     else:
         return f"{value:,.2f}"

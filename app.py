@@ -19,7 +19,7 @@ except Exception:
 
 from src.data_loader import load_data, get_context_summary, WEEK_LABELS, is_percentage_metric
 from src.analysis import run_analysis_query
-from src.gemini_client import parse_query_to_analysis, generate_response, generate_chart_data
+from src.gemini_client import parse_query_to_analysis, generate_response, generate_chart_data, generate_conversational_response
 from src.insights_engine import compile_raw_insights, generate_report_with_gemini, generate_pdf_report
 
 import matplotlib
@@ -150,21 +150,30 @@ def chat():
     
     # Step 1: Parse the natural language query
     parsed = parse_query_to_analysis(user_message, history)
-    
+
+    # If parsing failed entirely (API error), try conversational response
     if 'error' in parsed and not parsed.get('query_type'):
+        conv_response = generate_conversational_response(user_message, history)
         return jsonify({
-            'response': f"Lo siento, no pude interpretar tu pregunta. Error: {parsed['error']}\n\nIntentá ser más específico, por ejemplo: '¿Cuáles son las 5 zonas con mayor Lead Penetration?'",
+            'response': conv_response,
             'chart': None,
-            'csv_data': None
+            'csv_data': None,
+            'query_type': 'conversational',
+            'analysis_explanation': '',
         })
-    
+
     query_type = parsed.get('query_type')
     params = parsed.get('params', {})
-    
+
+    # If no data query was identified, handle as a conversational message
     if not query_type:
+        conv_response = generate_conversational_response(user_message, history)
         return jsonify({
-            'response': "No pude identificar el tipo de análisis que necesitás. ¿Podés reformular la pregunta? Por ejemplo: '¿Top 5 zonas con mayor Perfect Orders en Colombia?'",
+            'response': conv_response,
             'chart': None,
+            'csv_data': None,
+            'query_type': 'conversational',
+            'analysis_explanation': '',
         })
     
     # Step 2: Execute analysis

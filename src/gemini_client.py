@@ -216,9 +216,69 @@ Termina con la sección de sugerencia de siguiente análisis."""
         return f"Error generando respuesta: {str(e)}"
 
 
+def generate_conversational_response(user_message: str, conversation_history: list) -> str:
+    """Handle follow-up questions, clarifications, and conversational messages
+    that don't map to a specific data analysis query."""
+
+    # Build recent context summary
+    history_text = ""
+    for msg in conversation_history[-8:]:
+        role = "Usuario" if msg['role'] == 'user' else "Asistente"
+        history_text += f"{role}: {msg['content'][:400]}\n\n"
+
+    prompt = f"""Eres un asistente analítico de Rappi para equipos de SP&A y Operations.
+
+El usuario está en medio de una conversación de análisis de datos. Su mensaje puede ser:
+- Una pregunta de seguimiento sobre un análisis previo
+- Una solicitud de aclaración sobre un término o métrica
+- Una pregunta general sobre el negocio de Rappi
+- Un comentario o pregunta sobre la respuesta anterior
+
+HISTORIAL RECIENTE:
+{history_text}
+
+MENSAJE ACTUAL DEL USUARIO: {user_message}
+
+DICCIONARIO DE MÉTRICAS (para responder preguntas sobre ellas):
+- Perfect Orders: Órdenes sin cancelaciones, defectos ni demoras / Total órdenes. Mide calidad de servicio.
+- Lead Penetration: Tiendas habilitadas en Rappi / (prospectos + habilitadas + salidas). Mide cobertura de merchants.
+- Gross Profit UE: Margen bruto de ganancia / Total órdenes. Rentabilidad por orden.
+- % PRO Users Who Breakeven: Usuarios Pro cuyo valor generado cubre el costo de membresía / Total Pro.
+- % Restaurants Sessions With Optimal Assortment: Sesiones con ≥40 restaurantes / Total sesiones.
+- MLTV Top Verticals Adoption: Usuarios con órdenes en múltiples verticales / Total usuarios.
+- Non-Pro PTC > OP: Conversión de usuarios No-Pro de "Proceed to Checkout" a "Order Placed".
+- Pro Adoption: Usuarios con suscripción Pro / Total usuarios de Rappi.
+- Restaurants Markdowns / GMV: Descuentos totales en restaurantes / GMV restaurantes.
+- Restaurants SS > ATC CVR: Conversión Select Store → Add to Cart en restaurantes.
+- Restaurants SST > SS CVR: % usuarios que seleccionan una tienda al ver la lista de restaurantes.
+- Retail SST > SS CVR: % usuarios que seleccionan una tienda al ver la lista de supermercados.
+- Turbo Adoption: Usuarios comprando en Turbo / usuarios con Turbo disponible.
+- WoW: Week over Week — variación respecto a la semana anterior.
+- Score compuesto de problemática: normalización de Perfect Orders + Gross Profit UE + Lead Penetration.
+
+Respondé de forma clara, concisa y en español. Si el usuario pregunta sobre un término técnico, explicalo en lenguaje de negocio. Si pregunta por qué apareció algo en la pantalla, explicalo con contexto del análisis anterior. Máximo 150 palabras. No incluyas tablas ni gráficos en esta respuesta."""
+
+    messages = [{"role": "user", "parts": [{"text": prompt}]}]
+    payload = {
+        "contents": messages,
+        "generationConfig": {"temperature": 0.5, "maxOutputTokens": 512}
+    }
+    try:
+        resp = requests.post(
+            f"{GEMINI_URL}?key={GEMINI_API_KEY}",
+            json=payload,
+            timeout=30
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data['candidates'][0]['content']['parts'][0]['text']
+    except Exception as e:
+        return f"No pude procesar tu pregunta. ¿Podés reformularla? Si querés analizar datos, intentá algo como: '¿Top 5 zonas con mayor Perfect Orders en Argentina?'"
+
+
+
 def _chart_val(v, metric):
     """Scale value for chart display: ratios → ×100 for %, others → raw."""
-    from .data_loader import is_percentage_metric
     if v is None:
         return None
     if is_percentage_metric(metric, v):
@@ -265,13 +325,19 @@ def generate_chart_data(analysis_result: dict, analysis_type: str) -> dict | Non
         if not data:
             return None
         metric = analysis_result.get('metric', '')
+        # For metrics where mean can be skewed by outliers, use median for the chart
+        # but keep 'avg' label since that's what the user asked for
+        use_median_chart = any(d['avg'] > 2 for d in data)  # outlier detected
+        chart_key = 'median' if use_median_chart else 'avg'
+        chart_fmt_key = 'median_fmt' if use_median_chart else 'avg_fmt'
+        suffix = ' (mediana — media distorsionada por outliers)' if use_median_chart else ''
         return {
             'type': 'bar_horizontal',
             'labels': [d['country'] for d in data],
-            'values': [_chart_val(d['avg'], metric) for d in data],
-            'value_labels': [d['avg_fmt'] for d in data],
-            'title': f"Promedio por País — {metric}",
-            'ylabel': '%' if any(is_percentage_metric(metric, d['avg']) for d in data) else 'Valor',
+            'values': [_chart_val(d[chart_key], metric) for d in data],
+            'value_labels': [d[chart_fmt_key] for d in data],
+            'title': f"Promedio por País — {metric}{suffix}",
+            'ylabel': '%' if any(is_percentage_metric(metric, d[chart_key]) for d in data) else 'Valor',
             'color': '#FF441F',
         }
     
