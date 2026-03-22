@@ -208,6 +208,70 @@ def chat():
     except Exception:
         pass
 
+    # For problematic_zones, return a detailed table with score + component metrics
+    try:
+        if query_type == 'problematic_zones' and result and isinstance(result.get('data'), list):
+            rows = result['data']
+            if rows:
+                country = result.get('country', 'Todos los países')
+                header = f"**Zonas problemáticas — {country}**"
+                table_lines = [
+                    "| Zona | Ciudad | País | Score compuesto | Perfect Orders | Gross Profit UE | Lead Penetration |",
+                    "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+                ]
+                for r in rows[:5]:
+                    zone = r.get('zone', '')
+                    city = r.get('city', '')
+                    country_r = r.get('country', '')
+                    score = f"{r.get('problem_score', 0)*100:.0f}%"
+                    po = r.get('perfect_orders_fmt', r.get('Perfect Orders', 'N/A'))
+                    gp = r.get('gross_profit_fmt', r.get('Gross Profit UE', 'N/A'))
+                    lp = r.get('lead_penetration_fmt', r.get('Lead Penetration', 'N/A'))
+                    table_lines.append(f"| {zone} | {city} | {country_r} | {score} | {po} | {gp} | {lp} |")
+
+                table_md = header + "\n\n" + "\n".join(table_lines) + "\n"
+
+                # Methodology & interpretation
+                methodology = (
+                    "Para identificar las zonas problemáticas combiné tres métricas clave: Perfect Orders, "
+                    "Gross Profit UE y Lead Penetration. Cada métrica se normaliza en 0–1 (1 = peor) y el score "
+                    "compuesto es la media de las tres normalizaciones."
+                )
+                bullets = []
+                # top callout
+                try:
+                    top = rows[0]
+                    bullets.append(
+                        f"La zona con mayor score es **{top.get('zone')} ({top.get('country')})**: "
+                        f"score {top.get('problem_score')*100:.0f}%. Componentes: Perfect Orders={top.get('perfect_orders_fmt')}, "
+                        f"Gross Profit={top.get('gross_profit_fmt')}, Lead Penetration={top.get('lead_penetration_fmt')}.")
+                except Exception:
+                    pass
+                bullets.extend([
+                    "**Perfect Orders < 85%** → mala experiencia usuario; riesgo de churn.",
+                    "**Gross Profit UE** muy bajo o negativo → revisar pricing/subsidios y costos.",
+                    "**Lead Penetration < 15%** → oportunidad de habilitación de comercios; afecta assortment.",
+                ])
+
+                interpretation = "\n".join(f"- {b}" for b in bullets)
+                action = (
+                    "Acción: priorizar investigación operativa en las zonas del top-5, revisar cancelaciones/times/" 
+                    "promociones y coordinar una intervención regional esta semana."
+                )
+                next_steps = (
+                    "Siguientes análisis sugeridos: 1) Trend por zona (8 semanas); 2) Multivariable Perfect Orders vs Gross Profit; "
+                    "3) Exportar CSV para inspección granular."
+                )
+
+                response_text = (
+                    table_md + "\n**Metodología**\n\n" + methodology + "\n\n"
+                    + "**Interpretación ejecutiva**\n\n" + interpretation + "\n\n"
+                    + "**Línea de acción sugerida**\n\n" + action + "\n\n"
+                    + "**💡 Sugerencia de siguiente análisis**\n\n" + next_steps
+                )
+    except Exception:
+        pass
+
     # For top_zones responses, return a concise markdown table (title + table)
     # and omit the verbose AI analysis to avoid duplication.
     try:
