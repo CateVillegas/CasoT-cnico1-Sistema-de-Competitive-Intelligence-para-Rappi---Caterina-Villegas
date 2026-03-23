@@ -80,10 +80,16 @@ def _pct_change_safe(new_val, old_val):
     return (new_val - old_val) / abs(old_val)
 
 
-def detect_anomalies(df, threshold=0.10, abs_threshold_numeric=0.5):
+def detect_anomalies(df, threshold=0.10, abs_threshold_numeric=0.5, orders_df=None):
     from .data_loader import NUMERIC_METRICS
     df = df.dropna(subset=['L0W_ROLL', 'L1W_ROLL']).copy()
     df = df.drop_duplicates(subset=['COUNTRY', 'CITY', 'ZONE', 'METRIC'])
+    # Build orders lookup for severity weighting
+    orders_lookup = {}
+    if orders_df is not None:
+        for _, orow in orders_df.drop_duplicates(subset=['COUNTRY', 'CITY', 'ZONE']).iterrows():
+            orders_lookup[(orow['COUNTRY'], orow['CITY'], orow['ZONE'])] = orow.get('L0W_ROLL', 0)
+    max_orders = max(orders_lookup.values()) if orders_lookup else 1
     results = []
     for _, row in df.iterrows():
         metric = row['METRIC']
@@ -101,6 +107,12 @@ def detect_anomalies(df, threshold=0.10, abs_threshold_numeric=0.5):
             if pct is None or abs(pct) < threshold:
                 continue
             display = f"{pct*100:+.1f}%"
+        zone_orders = orders_lookup.get((row['COUNTRY'], row['CITY'], row['ZONE']), 0)
+        if pd.isna(zone_orders):
+            zone_orders = 0
+        # Severity = magnitude of change * volume weight (0-1)
+        vol_weight = (zone_orders / max_orders) if max_orders > 0 else 0
+        severity = abs(pct) * (0.4 + 0.6 * vol_weight)  # min 40% base, up to 100% for top volume
         results.append({
             'zone': row['ZONE'], 'city': row['CITY'],
             'country': COUNTRY_NAMES.get(row['COUNTRY'], row['COUNTRY']),
@@ -112,8 +124,10 @@ def detect_anomalies(df, threshold=0.10, abs_threshold_numeric=0.5):
             'change_pct': pct,
             'change_display': display,
             'direction': 'mejora' if pct > 0 else 'deterioro',
+            'orders': int(zone_orders),
+            'severity_score': round(severity, 4),
         })
-    results.sort(key=lambda x: abs(x['change_pct']), reverse=True)
+    results.sort(key=lambda x: x['severity_score'], reverse=True)
     return results[:25]
 
 
@@ -140,6 +154,30 @@ def detect_consistent_trends(df, n_weeks=3):
             'labels': WEEK_LABELS[-4:],
         }
         if all(d < 0 for d in diffs[-n_weeks:]):
+            # Add diagnostic context based on metric type and rate of decline
+            metric_name = row['METRIC']
+            rate = abs(total_change) * 100
+            if 'Gross Profit' in metric_name:
+                diag = 'Posible causa: incremento en costos logísticos, descuentos excesivos o caída en ticket promedio.'
+            elif 'Perfect Orders' in metric_name:
+                diag = 'Posible causa: problemas de fulfillment, cancelaciones de merchants o demoras en delivery.'
+            elif 'Lead Penetration' in metric_name:
+                diag = 'Posible causa: merchants abandonando la plataforma o estancamiento en activación de nuevos leads.'
+            elif 'Conversion' in metric_name or 'PTC' in metric_name or 'CVR' in metric_name:
+                diag = 'Posible causa: fricción en UX, cambios en métodos de pago o pricing poco competitivo.'
+            elif 'Turbo' in metric_name:
+                diag = 'Posible causa: problemas de cobertura, tiempos de entrega no competitivos o falta de awareness.'
+            elif 'MLTV' in metric_name or 'Verticals' in metric_name:
+                diag = 'Posible causa: usuarios concentrando compras en un solo vertical — revisar cross-sell y discovery.'
+            elif 'Pro' in metric_name:
+                diag = 'Posible causa: valor percibido de Pro en baja — revisar beneficios, pricing de membresía o churn.'
+            elif 'Markdowns' in metric_name:
+                diag = 'Posible causa: incremento en campañas de descuento sin control — revisar ROI de promociones.'
+            else:
+                diag = 'Revisar con el equipo local para identificar cambios operacionales recientes en la zona.'
+            if rate > 50:
+                diag += ' ⚡ Caída acelerada — requiere intervención urgente.'
+            entry['diagnostic'] = diag
             declining.append(entry)
         elif all(d > 0 for d in diffs[-n_weeks:]):
             improving.append(entry)
@@ -231,6 +269,12 @@ def detect_opportunities(df, orders_df):
                 continue
             seen.add(key)
             gap_pct = (overall_p50 - row['L0W_ROLL']) / abs(overall_p50) if abs(overall_p50) > 0.001 else 0
+            # Impact estimation: if metric reaches median, estimate order/revenue impact
+            potential_improvement = overall_p50 - row['L0W_ROLL']
+            weekly_orders = int(row['orders'])
+            # Rough impact: % improvement * orders = potential additional quality/converted orders
+            estimated_impact_orders = int(abs(potential_improvement) * weekly_orders) if metric != 'Gross Profit UE' else 0
+            estimated_impact_gp = round(potential_improvement * weekly_orders, 1) if metric == 'Gross Profit UE' else 0
             opportunities.append({
                 'zone': row['ZONE'], 'city': row['CITY'],
                 'country': COUNTRY_NAMES.get(row['COUNTRY'], row['COUNTRY']),
@@ -239,8 +283,11 @@ def detect_opportunities(df, orders_df):
                 'metric_value': row['L0W_ROLL'],
                 'metric_value_fmt': format_metric_value(metric, row['L0W_ROLL']),
                 'benchmark_fmt': format_metric_value(metric, overall_p50),
-                'orders': int(row['orders']),
+                'orders': weekly_orders,
                 'gap_pct': gap_pct,
+                'estimated_impact_orders': estimated_impact_orders,
+                'estimated_impact_gp': estimated_impact_gp,
+                'potential_improvement': potential_improvement,
             })
     opportunities.sort(key=lambda x: x['orders'], reverse=True)
     return opportunities[:12]
@@ -278,7 +325,7 @@ def compile_raw_insights():
     metrics_df, orders_df, _ = load_data()
     declining_trends, improving_trends = detect_consistent_trends(metrics_df)
     return {
-        'anomalies': detect_anomalies(metrics_df),
+        'anomalies': detect_anomalies(metrics_df, orders_df=orders_df),
         'declining_trends': declining_trends,
         'improving_trends': improving_trends,
         'benchmarking_gaps': detect_benchmarking_gaps(metrics_df),
@@ -414,6 +461,113 @@ def chart_correlations(correlations, dark=False):
     ax.set_axisbelow(True)
     legend = [mpatches.Patch(color=green, label='Positiva'), mpatches.Patch(color=red, label='Negativa')]
     ax.legend(handles=legend, facecolor=mid, edgecolor=grid, labelcolor=text, fontsize=8, loc='upper right')
+    plt.tight_layout()
+    return _fig_to_b64(fig, dark)
+
+
+def chart_correlation_heatmap(metrics_df, dark=False):
+    """Correlation heatmap matrix — shows all metric pair relationships visually."""
+    if metrics_df is None or metrics_df.empty:
+        return None
+    bg, mid, grid, text, red, orange, green, yellow = _colors(dark)
+    pivot = metrics_df.pivot_table(
+        index=['COUNTRY', 'CITY', 'ZONE'], columns='METRIC', values='L0W_ROLL'
+    )
+    pivot = pivot.dropna(thresh=4)
+    if pivot.shape[1] < 3:
+        return None
+    corr_matrix = pivot.corr()
+    # Shorten metric names for readability
+    short_names = {
+        '% PRO Users Who Breakeven': '% Pro Breakeven',
+        '% Restaurants Sessions With Optimal Assortment': '% Optimal Assort.',
+        'MLTV Top Verticals Adoption': 'MLTV Adoption',
+        'Non-Pro PTC > OP': 'Non-Pro Conv.',
+        'Pro Adoption (Last Week Status)': 'Pro Adoption',
+        'Restaurants Markdowns / GMV': 'Rest. Markdowns',
+        'Restaurants SS > ATC CVR': 'Rest. SS→ATC',
+        'Restaurants SST > SS CVR': 'Rest. SST→SS',
+        'Retail SST > SS CVR': 'Retail SST→SS',
+    }
+    labels = [short_names.get(c, c[:18]) for c in corr_matrix.columns]
+    n = len(labels)
+    fig, ax = plt.subplots(figsize=(max(8, n * 0.75), max(6, n * 0.6)))
+    fig.patch.set_facecolor(bg)
+    ax.set_facecolor(bg)
+    # Custom diverging colormap: red (negative) → white → green (positive)
+    from matplotlib.colors import LinearSegmentedColormap
+    cmap = LinearSegmentedColormap.from_list('rg', [red, '#FFFFFF', green])
+    im = ax.imshow(corr_matrix.values, cmap=cmap, vmin=-1, vmax=1, aspect='auto')
+    ax.set_xticks(range(n))
+    ax.set_yticks(range(n))
+    ax.set_xticklabels(labels, fontsize=6.5, color=text, rotation=45, ha='right')
+    ax.set_yticklabels(labels, fontsize=6.5, color=text)
+    # Annotate cells with correlation values
+    for i in range(n):
+        for j in range(n):
+            val = corr_matrix.values[i, j]
+            if not np.isnan(val):
+                txt_color = text if abs(val) < 0.5 else 'white'
+                ax.text(j, i, f'{val:.2f}', ha='center', va='center',
+                        fontsize=5.5, color=txt_color, fontweight='bold' if abs(val) > 0.5 else 'normal')
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.ax.tick_params(labelsize=7, colors=text)
+    cbar.set_label('Correlación (r)', fontsize=8, color=text)
+    ax.set_title('Matriz de Correlación entre Todas las Métricas', color=text,
+                 fontsize=10, fontweight='bold', pad=10)
+    plt.tight_layout()
+    return _fig_to_b64(fig, dark)
+
+
+def chart_correlation_scatter(metrics_df, metric_a, metric_b, correlation_value, dark=False):
+    """Scatter plot showing the relationship between two correlated metrics."""
+    if metrics_df is None or metrics_df.empty:
+        return None
+    bg, mid, grid, text, red, orange, green, yellow = _colors(dark)
+    pivot = metrics_df.pivot_table(
+        index=['COUNTRY', 'CITY', 'ZONE'], columns='METRIC', values='L0W_ROLL'
+    )
+    if metric_a not in pivot.columns or metric_b not in pivot.columns:
+        return None
+    valid = pivot[[metric_a, metric_b]].dropna()
+    if len(valid) < 10:
+        return None
+    x = valid[metric_a].values
+    y = valid[metric_b].values
+    # Scale percentage metrics
+    from .data_loader import RATIO_METRICS
+    x_plot = x * 100 if metric_a in RATIO_METRICS else x
+    y_plot = y * 100 if metric_b in RATIO_METRICS else y
+    fig, ax = plt.subplots(figsize=(7, 5))
+    fig.patch.set_facecolor(bg)
+    ax.set_facecolor(mid)
+    color = green if correlation_value > 0 else red
+    ax.scatter(x_plot, y_plot, c=color, alpha=0.45, s=20, edgecolors='white', linewidths=0.3)
+    # Trend line
+    z = np.polyfit(x_plot, y_plot, 1)
+    p = np.poly1d(z)
+    x_line = np.linspace(x_plot.min(), x_plot.max(), 100)
+    ax.plot(x_line, p(x_line), color=orange, linewidth=2, linestyle='--', alpha=0.8)
+    short_a = metric_a[:25]
+    short_b = metric_b[:25]
+    x_suffix = ' (%)' if metric_a in RATIO_METRICS else ''
+    y_suffix = ' (%)' if metric_b in RATIO_METRICS else ''
+    ax.set_xlabel(f'{short_a}{x_suffix}', color=text, fontsize=8)
+    ax.set_ylabel(f'{short_b}{y_suffix}', color=text, fontsize=8)
+    direction = 'positiva' if correlation_value > 0 else 'negativa'
+    ax.set_title(f'{short_a} vs {short_b}\nr = {correlation_value:.3f} (correlación {direction})',
+                 color=text, fontsize=9, fontweight='bold', pad=8)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_color(grid)
+    ax.spines['left'].set_color(grid)
+    ax.tick_params(colors=text, labelsize=7)
+    ax.grid(True, color=grid, linestyle='--', alpha=0.3)
+    # Add annotation box
+    ax.text(0.03, 0.95, f'n = {len(valid)} zonas\nr = {correlation_value:.3f}',
+            transform=ax.transAxes, fontsize=7.5, verticalalignment='top',
+            bbox=dict(boxstyle='round,pad=0.4', facecolor=mid, edgecolor=grid, alpha=0.9),
+            color=text)
     plt.tight_layout()
     return _fig_to_b64(fig, dark)
 
@@ -583,8 +737,9 @@ Devolvé EXACTAMENTE este JSON (sin markdown, sin texto extra):
   ],
   "narrativa": "2 párrafos. Párrafo 1: explicar el patrón general de esta semana (qué métrica está más afectada y en qué países). Párrafo 2: conectar las oportunidades con las correlaciones — qué intervención concreta puede tener el mayor impacto.",
   "recomendaciones": [
-    "acción 1: con zona/país/métrica específica y qué hacer exactamente",
-    "acción 2", "acción 3", "acción 4", "acción 5", "acción 6"
+    "ACCIÓN: [qué hacer concretamente] | ZONA/PAÍS: [dónde] | OWNER SUGERIDO: [equipo responsable: Ops Local, SP&A, Growth, Product, Finance] | TIMELINE: [esta semana / próximos 15 días / este mes] | IMPACTO ESPERADO: [cuantificación aproximada del beneficio]",
+    "acción 2 con mismo formato",
+    "acción 3", "acción 4", "acción 5", "acción 6", "acción 7", "acción 8"
   ],
   "alerta_critica": "1 frase. El hallazgo MÁS urgente con zona, métrica y magnitud concreta."
 }}"""
@@ -648,16 +803,19 @@ Devolvé EXACTAMENTE este JSON (sin markdown, sin texto extra):
 
         recs = []
         if anoms:
-            recs.append(f"Investigar causa raíz en {anoms[0]['zone']} ({anoms[0]['country']}): {anoms[0]['metric']} cambió {anoms[0]['change_display']} WoW — convocar al equipo local esta semana.")
+            recs.append(f"ACCIÓN: Investigar causa raíz del cambio de {anoms[0]['change_display']} en {anoms[0]['metric']} | ZONA/PAÍS: {anoms[0]['zone']} ({anoms[0]['country']}) | OWNER SUGERIDO: Ops Local | TIMELINE: Esta semana | IMPACTO ESPERADO: Prevenir propagación del deterioro a zonas adyacentes")
         if dec:
-            recs.append(f"Plan de intervención urgente para {dec[0]['zone']} ({dec[0]['country']}): {dec[0]['metric']} en caída por 4 semanas — escalar al country manager.")
+            recs.append(f"ACCIÓN: Plan de intervención urgente — {dec[0]['metric']} en caída por 4 semanas consecutivas | ZONA/PAÍS: {dec[0]['zone']} ({dec[0]['country']}) | OWNER SUGERIDO: SP&A + Ops Local | TIMELINE: Próximos 15 días | IMPACTO ESPERADO: Revertir caída de {abs(dec[0]['total_change_pct']*100):.0f}% acumulada")
         if opps:
-            recs.append(f"Priorizar mejora de {opps[0]['metric']} en {opps[0]['zone']} ({opps[0]['country']}): zona de alto volumen ({opps[0]['orders']:,} órd/sem) con gap de {abs(opps[0]['gap_pct']*100):.0f}% vs benchmark.")
+            impact_txt = f"{opps[0].get('estimated_impact_orders', 0):,} órdenes adicionales de calidad/sem" if opps[0].get('estimated_impact_orders', 0) > 0 else f"mejora en margen de {opps[0].get('estimated_impact_gp', 0):.0f}/orden"
+            recs.append(f"ACCIÓN: Priorizar mejora de {opps[0]['metric']} (actualmente {opps[0]['metric_value_fmt']} vs benchmark {opps[0]['benchmark_fmt']}) | ZONA/PAÍS: {opps[0]['zone']} ({opps[0]['country']}) — {opps[0]['orders']:,} órd/sem | OWNER SUGERIDO: Growth + Ops Local | TIMELINE: Este mes | IMPACTO ESPERADO: ~{impact_txt}")
         if corrs:
-            recs.append(f"Invertir en mejorar {corrs[0]['metric_a']} — dado que tiene correlación fuerte con {corrs[0]['metric_b']}, el efecto será doble.")
+            recs.append(f"ACCIÓN: Focalizar intervención en {corrs[0]['metric_a']} — correlación fuerte (r={corrs[0]['correlation']:.2f}) con {corrs[0]['metric_b']} genera efecto cascada | OWNER SUGERIDO: SP&A | TIMELINE: Próximos 15 días | IMPACTO ESPERADO: Mejora simultánea en ambas métricas")
         recs += [
-            "Documentar las buenas prácticas de las zonas con mejora consistente y compartirlas con equipos locales.",
-            "Revisar estructura de costos en todas las zonas con Gross Profit UE negativo o en caída.",
+            "ACCIÓN: Documentar buenas prácticas de zonas con mejora consistente y crear playbook replicable | OWNER SUGERIDO: SP&A | TIMELINE: Este mes | IMPACTO ESPERADO: Acelerar mejora en zonas rezagadas con prácticas ya validadas",
+            "ACCIÓN: Auditar estructura de costos en zonas con Gross Profit UE negativo o en caída | OWNER SUGERIDO: Finance + Ops | TIMELINE: Próximos 15 días | IMPACTO ESPERADO: Identificar y corregir fuentes de pérdida por orden",
+            "ACCIÓN: Revisar pricing y descuentos en zonas con Restaurants Markdowns/GMV alto y Gross Profit bajo | OWNER SUGERIDO: Growth + Finance | TIMELINE: Este mes | IMPACTO ESPERADO: Reducir subsidios ineficientes sin impactar conversión",
+            "ACCIÓN: Activar campaña de Turbo en zonas con baja adopción pero alta densidad de tiendas Turbo disponibles | OWNER SUGERIDO: Growth + Marketing | TIMELINE: Próximas 2 semanas | IMPACTO ESPERADO: Incrementar ticket promedio y diferenciación competitiva",
         ]
 
         alert = f"{anoms[0]['zone']} ({anoms[0]['country']}) — {anoms[0]['metric']}: {anoms[0]['change_display']} WoW." if anoms else "Múltiples zonas con Gross Profit UE negativo — revisar urgente."
@@ -742,10 +900,17 @@ def generate_html_report(raw_insights: dict, executive_summary: dict) -> str:
         sc_rows += f'<tr>{cells}</tr>'
 
     # ── Anomalies table ──
+    anom_scores = [a.get('severity_score', 0) for a in anomalies[:15] if a.get('severity_score', 0) > 0]
+    anom_p75 = sorted(anom_scores)[int(len(anom_scores)*0.75)] if len(anom_scores) > 2 else 10
+    anom_p25 = sorted(anom_scores)[int(len(anom_scores)*0.25)] if len(anom_scores) > 2 else 3
     anom_rows = ''
     for a in anomalies[:15]:
         cur_fmt = format_metric_value(a['metric'], a['current'])
         pre_fmt = format_metric_value(a['metric'], a['previous'])
+        sev = a.get('severity_score', 0)
+        sev_label = 'CRÍTICA' if sev >= anom_p75 else ('ALTA' if sev >= anom_p25 else 'MEDIA')
+        sev_color = RED if sev >= anom_p75 else (YELLOW if sev >= anom_p25 else '#9999BB')
+        orders_val = a.get('orders', 0)
         anom_rows += (
             f'<tr><td><strong style="color:#eee">{a["zone"]}</strong>'
             f'<br><span style="font-size:11px;color:#9999BB">{a["city"]} · {a["country"]}</span></td>'
@@ -753,7 +918,9 @@ def generate_html_report(raw_insights: dict, executive_summary: dict) -> str:
             f'<td style="font-size:12px">{a["metric"]}</td>'
             f'<td style="text-align:center">{_wow_badge(a["direction"], a["change_display"])}</td>'
             f'<td style="text-align:center;font-family:monospace;font-size:12px">'
-            f'{pre_fmt} → <strong style="color:#eee">{cur_fmt}</strong></td></tr>'
+            f'{pre_fmt} → <strong style="color:#eee">{cur_fmt}</strong></td>'
+            f'<td style="text-align:center;font-size:11px;color:#9999BB">{orders_val:,}</td>'
+            f'<td style="text-align:center"><span style="color:{sev_color};font-weight:700;font-size:11px">{sev_label}</span></td></tr>'
         )
 
     # ── Trends table ──
@@ -763,13 +930,15 @@ def generate_html_report(raw_insights: dict, executive_summary: dict) -> str:
             f'<span style="color:#9999BB;font-size:10px">{format_metric_value(t["metric"], v)}</span>'
             for v in t['values']
         )
+        diag_html = t.get('diagnostic', '')
         trend_rows += (
             f'<tr><td><strong style="color:#eee">{t["zone"]}</strong>'
             f'<br><span style="font-size:11px;color:#9999BB">{t["city"]} · {t["country"]}</span></td>'
             f'<td style="font-size:12px">{t["metric"]}</td>'
             f'<td style="text-align:center"><span style="color:{RED};font-weight:700">'
             f'{t["total_change_pct"]*100:.1f}%</span></td>'
-            f'<td style="font-size:11px">{vals_html}</td></tr>'
+            f'<td style="font-size:11px">{vals_html}</td>'
+            f'<td style="font-size:11px;color:#9999BB;max-width:250px">{diag_html}</td></tr>'
         )
 
     # ── Improving table ──
@@ -824,6 +993,14 @@ def generate_html_report(raw_insights: dict, executive_summary: dict) -> str:
     opp_rows = ''
     for o in opps:
         gap_pct = abs(o['gap_pct']) * 100
+        imp_orders = o.get('estimated_impact_orders', 0)
+        imp_gp = o.get('estimated_impact_gp', 0)
+        if imp_orders > 0:
+            impact_html = f'<span style="color:{ORANGE};font-weight:700;font-size:11px">~{imp_orders:,} órd. calidad/sem</span>'
+        elif imp_gp != 0:
+            impact_html = f'<span style="color:{ORANGE};font-weight:700;font-size:11px">~{imp_gp:+,.0f} margen/sem</span>'
+        else:
+            impact_html = f'<span style="color:{ORANGE};font-size:11px">{gap_pct:.0f}% gap</span>'
         opp_rows += (
             f'<tr><td><strong style="color:#eee">{o["zone"]}</strong>'
             f'<br><span style="font-size:11px;color:#9999BB">{o["city"]} · {o["country"]}</span></td>'
@@ -837,7 +1014,7 @@ def generate_html_report(raw_insights: dict, executive_summary: dict) -> str:
             f'<td style="min-width:100px">'
             f'<div style="background:#1C1C2E;border-radius:100px;height:7px;overflow:hidden;margin-bottom:3px">'
             f'<div style="width:{min(gap_pct,100):.0f}%;background:{ORANGE};height:100%;border-radius:100px"></div></div>'
-            f'<span style="font-size:10px;color:{ORANGE}">{gap_pct:.0f}% debajo</span></td></tr>'
+            f'{impact_html}</td></tr>'
         )
 
     # ── Hallazgos & recs ──
@@ -976,7 +1153,7 @@ body{{font-family:"DM Sans",sans-serif;background:#0B0B14;color:#EEEEF5;min-heig
   <div class="chart-box full" style="margin-bottom:16px">{_img_tag(ch_anom, 'Top deterioros')}</div>
   <div style="overflow-x:auto">
     <table class="dt">
-      <thead><tr><th>Zona</th><th>Tipo</th><th>Métrica</th><th>Cambio WoW</th><th>Anterior → Actual</th></tr></thead>
+      <thead><tr><th>Zona</th><th>Tipo</th><th>Métrica</th><th>Cambio WoW</th><th>Anterior → Actual</th><th>Órd/sem</th><th>Severidad</th></tr></thead>
       <tbody>{anom_rows}</tbody>
     </table>
   </div>
@@ -989,7 +1166,7 @@ body{{font-family:"DM Sans",sans-serif;background:#0B0B14;color:#EEEEF5;min-heig
   {_img_tag(ch_dec, 'Tendencias deterioro')}
   <div style="overflow-x:auto;margin-top:14px">
     <table class="dt">
-      <thead><tr><th>Zona</th><th>Métrica</th><th>Cambio Total</th><th>Evolución (últimas 4 semanas)</th></tr></thead>
+      <thead><tr><th>Zona</th><th>Métrica</th><th>Cambio Total</th><th>Evolución (últimas 4 semanas)</th><th>Diagnóstico Probable</th></tr></thead>
       <tbody>{trend_rows}</tbody>
     </table>
   </div>
@@ -1040,7 +1217,7 @@ body{{font-family:"DM Sans",sans-serif;background:#0B0B14;color:#EEEEF5;min-heig
   {_img_tag(ch_opp, 'Oportunidades')}
   <div style="overflow-x:auto;margin-top:14px">
     <table class="dt">
-      <thead><tr><th>Zona</th><th>Tipo</th><th>Métrica con Gap</th><th>Actual vs Benchmark</th><th>Órdenes/sem</th><th>Gap</th></tr></thead>
+      <thead><tr><th>Zona</th><th>Tipo</th><th>Métrica con Gap</th><th>Actual vs Benchmark</th><th>Órdenes/sem</th><th>Impacto Estimado</th></tr></thead>
       <tbody>{opp_rows}</tbody>
     </table>
   </div>
@@ -1173,7 +1350,7 @@ def generate_pdf_report(raw_insights: dict, output_path: str) -> str:
     opps       = raw_insights.get('opportunities', [])
     scorecards = raw_insights.get('scorecards', [])
     ex         = raw_insights.get('executive_summary', {})
-    hallazgos  = ex.get('hallazgos', [])
+    hallazgos  = ex.get('hallazgos_criticos', ex.get('hallazgos', []))
     recs       = ex.get('recomendaciones', [])
     narrativa  = ex.get('narrativa', '')
 
@@ -1190,6 +1367,16 @@ def generate_pdf_report(raw_insights: dict, output_path: str) -> str:
     ch_conv = chart_country_metric(scorecards, 'Non-Pro PTC > OP')
     ch_prio = chart_high_priority_perf(metrics_df) if metrics_df is not None else None
     ch_funnel = chart_funnel_by_country(metrics_df) if metrics_df is not None else None
+    ch_heatmap = chart_correlation_heatmap(metrics_df) if metrics_df is not None else None
+    # Scatter plots for top 2 strongest correlations
+    ch_scatter_1 = None
+    ch_scatter_2 = None
+    if corrs and metrics_df is not None:
+        c1 = corrs[0]
+        ch_scatter_1 = chart_correlation_scatter(metrics_df, c1['metric_a'], c1['metric_b'], c1['correlation'])
+        if len(corrs) > 1:
+            c2 = corrs[1]
+            ch_scatter_2 = chart_correlation_scatter(metrics_df, c2['metric_a'], c2['metric_b'], c2['correlation'])
 
     now = datetime.now().strftime('%d/%m/%Y %H:%M')
 
@@ -1245,9 +1432,9 @@ def generate_pdf_report(raw_insights: dict, output_path: str) -> str:
         ('4.', 'Tendencias Preocupantes — Deterioro Sostenido 3+ Semanas'),
         ('5.', 'Benchmarking — Brechas entre Zonas Similares'),
         ('6.', 'Correlaciones entre Métricas Operacionales'),
-        ('7.', 'Desempeño por Priorización de Zona'),
-        ('8.', 'Embudo de Conversión en Restaurantes por País'),
-        ('9.', 'Oportunidades de Alto Impacto'),
+        ('7.', 'Oportunidades de Alto Impacto'),
+        ('8.', 'Desempeño por Priorización de Zona'),
+        ('9.', 'Embudo de Conversión en Restaurantes por País'),
         ('10.', 'Recomendaciones Accionables para Esta Semana'),
         ('11.', 'Glosario de Métricas'),
     ]
@@ -1381,19 +1568,29 @@ def generate_pdf_report(raw_insights: dict, output_path: str) -> str:
         det = [a for a in anomalies if a['direction'] == 'deterioro'][:10]
         mej = [a for a in anomalies if a['direction'] == 'mejora'][:5]
 
-        story.append(Paragraph('Deterioros más significativos', sH3))
+        story.append(Paragraph('Deterioros más significativos (ordenados por severidad = magnitud × volumen)', sH3))
         rows = [[Paragraph('Zona', sTH), Paragraph('País', sTH), Paragraph('Métrica', sTH),
-                 Paragraph('Cambio WoW', sTH), Paragraph('Semana ant. → Actual', sTH)]]
+                 Paragraph('Cambio WoW', sTH), Paragraph('Ant. → Actual', sTH),
+                 Paragraph('Órd/sem', sTH), Paragraph('Severidad', sTH)]]
+        # Compute severity thresholds from data
+        det_scores = [a.get('severity_score', 0) for a in det if a.get('severity_score', 0) > 0]
+        sev_p75 = sorted(det_scores)[int(len(det_scores)*0.75)] if len(det_scores) > 2 else 10
+        sev_p25 = sorted(det_scores)[int(len(det_scores)*0.25)] if len(det_scores) > 2 else 3
         for a in det:
+            sev = a.get('severity_score', 0)
+            sev_label = 'CRÍTICA' if sev >= sev_p75 else ('ALTA' if sev >= sev_p25 else 'MEDIA')
+            sev_color = CR if sev >= sev_p75 else (CY if sev >= sev_p25 else CMT)
             rows.append([
-                Paragraph(a['zone'][:32], sTD),
+                Paragraph(a['zone'][:28], sTD),
                 Paragraph(a['country'], sTDm),
-                Paragraph(a['metric'][:28], sTDm),
+                Paragraph(a['metric'][:24], sTDm),
                 Paragraph(a['change_display'], ps('cd','Helvetica-Bold',9,CR, alignment=TA_CENTER)),
-                Paragraph(f"{format_metric_value(a['metric'], a['previous'])}  →  "
+                Paragraph(f"{format_metric_value(a['metric'], a['previous'])} → "
                           f"{format_metric_value(a['metric'], a['current'])}", sTDm),
+                Paragraph(f"{a.get('orders', 0):,}", sCtr),
+                Paragraph(sev_label, ps('sv','Helvetica-Bold',8,sev_color, alignment=TA_CENTER)),
             ])
-        story.append(tbl(rows, [CW*0.27, CW*0.12, CW*0.24, CW*0.14, CW*0.23]))
+        story.append(tbl(rows, [CW*0.22, CW*0.10, CW*0.20, CW*0.12, CW*0.18, CW*0.09, CW*0.09]))
 
         if mej:
             story.append(Spacer(1, 8))
@@ -1435,20 +1632,23 @@ def generate_pdf_report(raw_insights: dict, output_path: str) -> str:
     if declining:
         story.append(Spacer(1, 6))
         rows = [[Paragraph('Zona', sTH), Paragraph('País', sTH), Paragraph('Métrica', sTH),
-                 Paragraph('Caída acumulada (4 sem.)', sTH), Paragraph('Urgencia', sTH)]]
+                 Paragraph('Caída (4 sem.)', sTH), Paragraph('Urgencia', sTH),
+                 Paragraph('Diagnóstico Probable', sTH)]]
         for t in declining[:10]:
             pct = t['total_change_pct'] * 100
             urgencia = ('Monitorear' if abs(pct) < 20 else
                        'Intervenir' if abs(pct) < 50 else
-                       '⚡ Urgente')
+                       'Urgente')
+            diag = t.get('diagnostic', 'Revisar con equipo local.')
             rows.append([
-                Paragraph(t['zone'][:30], sTD),
+                Paragraph(t['zone'][:26], sTD),
                 Paragraph(t['country'], sTDm),
-                Paragraph(t['metric'][:26], sTDm),
+                Paragraph(t['metric'][:22], sTDm),
                 Paragraph(f"{pct:+.1f}%", ps('tc','Helvetica-Bold',9,CR,alignment=TA_CENTER)),
                 Paragraph(urgencia, ps('ur','Helvetica-Bold',8,CR if abs(pct)>=50 else CY,alignment=TA_CENTER)),
+                Paragraph(diag[:80], ps('dg','Helvetica',7,CMT, leading=9)),
             ])
-        story.append(tbl(rows, [CW*0.26, CW*0.11, CW*0.24, CW*0.18, CW*0.21]))
+        story.append(tbl(rows, [CW*0.18, CW*0.09, CW*0.16, CW*0.11, CW*0.10, CW*0.36]))
 
     if improving:
         story.append(Spacer(1, 10))
@@ -1549,8 +1749,51 @@ def generate_pdf_report(raw_insights: dict, output_path: str) -> str:
         story.append(Spacer(1, 5))
         story.append(tbl(rows, [CW*0.20, CW*0.20, CW*0.10, CW*0.12, CW*0.38]))
 
+    # Correlation heatmap
+    if ch_heatmap:
+        story.append(Spacer(1, 10))
+        story.append(Paragraph('Matriz Completa de Correlaciones', sH3))
+        story.append(Paragraph(
+            'Esta matriz muestra todas las correlaciones entre métricas. '
+            'Los colores verdes indican correlación positiva (suben juntas), '
+            'los rojos correlación negativa (una sube cuando la otra baja). '
+            'La intensidad del color indica la fuerza de la relación.', sBod))
+        hm_img = img_flow(ch_heatmap, CW, 220)
+        if hm_img:
+            story.append(hm_img)
+            story.append(Spacer(1, 4))
+            story.append(interpretation(
+                'Buscar celdas con colores intensos (r > 0.5 o r < -0.5). '
+                'Estos pares de métricas son los que tienen mayor potencial de "efecto cascada": '
+                'una intervención en una métrica impacta automáticamente la otra.'
+            ))
+
+    # Scatter plots for top correlations
+    if ch_scatter_1 or ch_scatter_2:
+        story.append(Spacer(1, 10))
+        story.append(Paragraph('Detalle Visual — Correlaciones Más Fuertes', sH3))
+        story.append(Paragraph(
+            'Cada punto representa una zona. La línea punteada muestra la tendencia. '
+            'Si los puntos siguen la línea de cerca, la relación es consistente en todo el mercado.', sBod))
+        story.append(Spacer(1, 4))
+        if ch_scatter_1:
+            sc1_img = img_flow(ch_scatter_1, CW * 0.85, 180)
+            if sc1_img:
+                story.append(sc1_img)
+                story.append(Spacer(1, 6))
+        if ch_scatter_2:
+            sc2_img = img_flow(ch_scatter_2, CW * 0.85, 180)
+            if sc2_img:
+                story.append(sc2_img)
+                story.append(Spacer(1, 4))
+        story.append(interpretation(
+            'Una nube de puntos apretada alrededor de la línea = relación robusta y predecible. '
+            'Puntos dispersos = la correlación existe pero con mucha variabilidad entre zonas. '
+            'Las zonas alejadas de la tendencia son outliers que merecen investigación individual.'
+        ))
+
     # ════════════════════════════════════════════════════════════
-    # 7. OPPORTUNITIES
+    # 7. OPPORTUNITIES (moved before priority zones)
     # ════════════════════════════════════════════════════════════
     story.append(PageBreak())
     story.append(Paragraph('7.  Oportunidades de Alto Impacto', sH2))
@@ -1576,25 +1819,36 @@ def generate_pdf_report(raw_insights: dict, output_path: str) -> str:
     if opps:
         story.append(Spacer(1, 6))
         rows = [[Paragraph('Zona', sTH), Paragraph('País / Tipo', sTH),
-                 Paragraph('Métrica con Gap', sTH), Paragraph('Valor actual', sTH),
-                 Paragraph('Benchmark (mediana)', sTH), Paragraph('Órdenes/sem', sTH)]]
+                 Paragraph('Métrica con Gap', sTH), Paragraph('Actual vs Benchmark', sTH),
+                 Paragraph('Órd/sem', sTH), Paragraph('Impacto Estimado', sTH)]]
         for o in opps:
+            # Build impact string
+            imp_orders = o.get('estimated_impact_orders', 0)
+            imp_gp = o.get('estimated_impact_gp', 0)
+            if imp_orders > 0:
+                impact_str = f"~{imp_orders:,} órd. de\ncalidad adicionales"
+            elif imp_gp != 0:
+                impact_str = f"~{imp_gp:+,.0f} margen\nadicional/sem"
+            else:
+                impact_str = f"{abs(o['gap_pct']*100):.0f}% gap\nvs benchmark"
             rows.append([
-                Paragraph(o['zone'][:28], sTD),
+                Paragraph(f"{o['zone'][:24]}", sTD),
                 Paragraph(f"{o['country']}\n{o.get('zone_type','')}", sTDm),
-                Paragraph(o['metric'][:24], sTDm),
-                Paragraph(o['metric_value_fmt'], ps('ov','Helvetica-Bold',9,CR, alignment=TA_CENTER)),
-                Paragraph(o['benchmark_fmt'], ps('bv','Helvetica-Bold',9,CG, alignment=TA_CENTER)),
+                Paragraph(o['metric'][:22], sTDm),
+                Paragraph(f"<font color='#E03000'>{o['metric_value_fmt']}</font> vs "
+                          f"<font color='#16A34A'>{o['benchmark_fmt']}</font>",
+                          ps('ab','Helvetica',8,CTX, alignment=TA_CENTER, leading=11)),
                 Paragraph(f"{o['orders']:,}", sCtr),
+                Paragraph(impact_str, ps('im','Helvetica-Bold',7.5,CO, alignment=TA_CENTER, leading=10)),
             ])
-        story.append(tbl(rows, [CW*0.24, CW*0.15, CW*0.21, CW*0.13, CW*0.16, CW*0.11]))
+        story.append(tbl(rows, [CW*0.20, CW*0.13, CW*0.18, CW*0.19, CW*0.10, CW*0.20]))
 
     # ════════════════════════════════════════════════════════════
-    # 7. HIGH PRIORITY ZONES
+    # 8. HIGH PRIORITY ZONES
     # ════════════════════════════════════════════════════════════
     if ch_prio:
         story.append(PageBreak())
-        story.append(Paragraph('7.  Desempeño por Priorización de Zona', sH2))
+        story.append(Paragraph('8.  Desempeño por Priorización de Zona', sH2))
         story.append(hr(CR, 0.8))
         story.append(Paragraph(
             'Qué muestra: Compara el promedio de métricas clave entre zonas clasificadas como '
@@ -1613,11 +1867,11 @@ def generate_pdf_report(raw_insights: dict, output_path: str) -> str:
             ))
 
     # ════════════════════════════════════════════════════════════
-    # 8. FUNNEL
+    # 9. FUNNEL
     # ════════════════════════════════════════════════════════════
     if ch_funnel:
         story.append(PageBreak())
-        story.append(Paragraph('8.  Embudo de Conversión en Restaurantes por País', sH2))
+        story.append(Paragraph('9.  Embudo de Conversión en Restaurantes por País', sH2))
         story.append(hr(CR, 0.8))
         story.append(Paragraph(
             'Las tres etapas del funnel: '
@@ -1638,10 +1892,10 @@ def generate_pdf_report(raw_insights: dict, output_path: str) -> str:
             ))
 
     # ════════════════════════════════════════════════════════════
-    # 9. RECOMMENDATIONS
+    # 10. RECOMMENDATIONS
     # ════════════════════════════════════════════════════════════
     story.append(PageBreak())
-    story.append(Paragraph('9.  Recomendaciones Accionables para Esta Semana', sH2))
+    story.append(Paragraph('10.  Recomendaciones Accionables para Esta Semana', sH2))
     story.append(hr(CR, 0.8))
     story.append(Paragraph(
         'Derivadas directamente de los hallazgos anteriores — priorizadas por potencial de impacto inmediato.', sBod))
@@ -1669,10 +1923,10 @@ def generate_pdf_report(raw_insights: dict, output_path: str) -> str:
             story.append(Spacer(1, 3))
 
     # ════════════════════════════════════════════════════════════
-    # 9. GLOSSARY
+    # 11. GLOSSARY
     # ════════════════════════════════════════════════════════════
     story.append(PageBreak())
-    story.append(Paragraph('10.  Glosario de Métricas', sH2))
+    story.append(Paragraph('11.  Glosario de Métricas', sH2))
     story.append(hr(CR, 0.8))
     story.append(Paragraph(
         'Referencia rápida de todas las métricas usadas en este reporte, '
