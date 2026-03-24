@@ -121,6 +121,7 @@ Usuario → Frontend (index.html)
 ```
 rappi_analytics/
 ├── app.py                  # Flask app principal, rutas API
+├── Informe final.pdf
 ├── src/
 │   ├── __init__.py
 │   ├── data_loader.py      # Carga y cache del Excel, constantes
