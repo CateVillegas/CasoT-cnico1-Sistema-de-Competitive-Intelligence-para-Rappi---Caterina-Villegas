@@ -1,8 +1,8 @@
-# 🦊 Rappi Analytics — Sistema de Análisis Inteligente
+# Rappi Analytics — Sistema de Análisis Inteligente
 
 Sistema de IA para democratizar el acceso a datos operacionales de Rappi, diseñado para equipos de **Strategy, Planning & Analytics (SP&A)** y **Operations**.
 
-## ✨ Capacidades clave
+## Capacidades clave
 
 - **Asistente conversacional**: entiende lenguaje natural, ejecuta consultas estructuradas sobre el Excel operativo y responde con tablas Markdown, gráficos Matplotlib y exportación CSV.
 - **Motor de insights automáticos**: recorre todas las zonas/países, detecta anomalías, tendencias, correlaciones y oportunidades; genera un resumen ejecutivo listo para “copy-paste”.
@@ -12,7 +12,7 @@ Sistema de IA para democratizar el acceso a datos operacionales de Rappi, diseñ
 
 ---
 
-## 🚀 Puesta en marcha rápida
+## Puesta en marcha rápida
 
 ### 1. Requisitos
 - Python 3.8+
@@ -50,7 +50,7 @@ http://localhost:5001
 
 ---
 
-## 🧭 Flujos dentro de la interfaz
+## Flujos dentro de la interfaz
 
 ### Chat “Asistente de Operaciones”
 1. Ingresá a la vista **Asistente** (por defecto).
@@ -97,7 +97,7 @@ curl -X POST http://localhost:5001/api/generate-pdf -o Rappi_Reporte_Ejecutivo.p
 
 ---
 
-## 🧠 Arquitectura técnica
+## Arquitectura técnica
 
 ```
 Usuario → Frontend (index.html)
@@ -151,7 +151,7 @@ rappi_analytics/
 - El generador de insights depende del último dataset cargado; si se actualiza `data.xlsx` es necesario reiniciar el servidor.
 - El PDF exporta gráficos como imágenes raster y tablas como texto enriquecido, no como tablas editables.
 
-## 🔮 Próximos pasos
+## Próximos pasos
 - Persistencia de conversaciones e insights en SQLite/Postgres para auditoría y handoff entre analistas.
 - Alertas automáticas por email/Slack cuando se detecten anomalías críticas.
 - Deployment administrado (Render/Railway) con autenticación básica y rotación de API Keys.
